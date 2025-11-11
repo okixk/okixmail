@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Web Mail - Structure Demo</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" aria-label="App name">Mail</div>
+    <div class="search-wrap" role="search">
+      <input id="search" type="search" placeholder="Search mail" aria-label="Search mail" />
+    </div>
+    <div class="actions" role="toolbar" aria-label="Global actions">
+      <button class="icon-btn" aria-label="Compose">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM21.41 6.34a1.25 1.25 0 0 0 0-1.77l-2.98-2.98a1.25 1.25 0 0 0-1.77 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+      </button>
+      <button id="refreshBtn" class="icon-btn" aria-label="Refresh">
+        <svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 6h-2.1a6 6 0 1 1-1.5-3.65l-2.2 2.2H22V2l-2.35 2.35z"/></svg>
+      </button>
+      <button class="icon-btn" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.65 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.14.25.45.35.7.25l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.05.26.26.42.5.42h3.84c.24 0 .45-.16.5-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96c.25.1.56 0 .7-.25l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout" role="main">
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="section">
+        <h3>Mailboxes</h3>
+        <nav class="list-nav" aria-label="Inboxes" id="inboxNav">
+          <!-- All -->
+          <a class="nav-item active" data-account="all">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18l-2 10a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3L3 7Z"/><path d="M3 7l6 6h6l6-6"/></svg>
+            All <span class="badge" data-count="all"></span>
+          </a>
+          <!-- accounts get injected here -->
+          <div id="accountList"></div>
+        </nav>
+      </div>
+
+      <!-- your Folders section can stay as is -->
+      <div class="section">
+        <h3>Folders</h3>
+        <nav class="list-nav" aria-label="User folders">
+          <a class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2"/></svg>Folder 1</a>
+          <a class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2"/></svg>Folder 2</a>
+          <a class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2"/></svg>Folder 3</a>
+        </nav>
+      </div>
+
+      <div class="foot small">Cleanup</div>
+    </aside>
+
+    <section class="message-pane" aria-label="Message list and filters">
+      <div class="pane-header">
+        <h2 id="mailboxTitle">Inbox — All</h2>
+        <span id="messageCount" class="muted">0 Messages</span>
+      </div>
+      <ul id="messageList" class="messages empty" aria-live="polite">
+        <li class="empty-state">No Mail</li>
+      </ul>
+    </section>
+
+    <section class="detail-pane" id="detailPane" aria-label="Message detail">
+      <div class="placeholder"><p>No Message Selected</p></div>
+    </section>
+  </main>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
