@@ -3,8 +3,11 @@ const state = {
   account: "all",
   folder: "INBOX",
   baseTitle: document.title,
+  selectedMessage: null, // currently opened / selected mail
+  lastDeleted: null,     // info for "restore last deleted"
 };
-const $ = (sel, root = document) => root.querySelector(sel);
+
+const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 function spinRefresh() {
@@ -45,7 +48,8 @@ function formatBytes(bytes) {
 // --- Sidebar (accounts) ---
 function accountIconSvg() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">
-    <circle cx="12" cy="8" r="4"></circle><path d="M4 20a8 8 0 0 1 16 0"></path>
+    <circle cx="12" cy="8" r="4"></circle>
+    <path d="M4 20a8 8 0 0 1 16 0"></path>
   </svg>`;
 }
 
@@ -53,14 +57,17 @@ function renderAccounts(accounts) {
   const wrap = $("#accountList");
   wrap.innerHTML = accounts.map(a => `
     <a class="nav-item account" data-account="${a.key}">
-      ${accountIconSvg()}${a.label} <span class="badge" data-count="${a.key}"></span>
+      ${accountIconSvg()}${a.label}
+      <span class="badge" data-count="${a.key}"></span>
     </a>
   `).join("");
+
   $$(".nav-item[data-account]").forEach(a => {
     a.addEventListener("click", () => setActiveAccount(a.dataset.account));
   });
 }
 
+// --- Sidebar (folders) ---
 function folderIconSvg() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"></path>
@@ -104,7 +111,6 @@ async function loadInboxCounts() {
   const res = await fetch("/api/inbox");
   const data = await res.json();
 
-  // badges
   const totalUnread = data.all.unread || 0;
   setTitleUnread(totalUnread);
 
@@ -127,6 +133,7 @@ async function loadMessages(account) {
     $("#messageList").innerHTML = '<li class="empty-state">Failed to fetch.</li>';
     return;
   }
+
   let msgs;
   try {
     msgs = await res.json();
@@ -140,7 +147,6 @@ async function loadMessages(account) {
     return;
   }
 
-  // FILTER IF USING MULTIPLE ACCOUNTS
   msgs = msgs.filter(m => (account === "all" || m.account === account));
 
   const list = $("#messageList");
@@ -165,10 +171,13 @@ async function loadMessages(account) {
   count.textContent = `${msgs.length} ${msgs.length === 1 ? "Message" : "Messages"}`;
 }
 
+// --- Detail view / attachments ---
 async function openMessage(account, id) {
   if (!id) return;
 
   const folder = state.folder || "INBOX";
+  state.selectedMessage = { account, id };
+
   const res = await fetch(
     `/api/message/${encodeURIComponent(account)}/${encodeURIComponent(id)}?mark_read=1&folder=${encodeURIComponent(folder)}`
   );
@@ -221,12 +230,104 @@ async function openMessage(account, id) {
     </article>
   `;
 
-  // Mark row as read
+  // mark row as read + selected
+  $$(".message-row").forEach(row => row.classList.remove("selected"));
   const row = $(`.message-row[data-account="${CSS.escape(account)}"][data-id="${CSS.escape(String(id))}"]`);
-  if (row) row.classList.remove("unread");
+  if (row) {
+    row.classList.remove("unread");
+    row.classList.add("selected");
+  }
 
   await loadInboxCounts();
   await loadFolders();
+}
+
+// --- Delete / Restore ---
+async function deleteSelectedMessage() {
+  const sel = state.selectedMessage;
+  if (!sel) return;
+
+  const folder = state.folder || "INBOX";
+
+  const res = await fetch(
+    `/api/message/${encodeURIComponent(sel.account)}/${encodeURIComponent(sel.id)}/delete?folder=${encodeURIComponent(folder)}`,
+    { method: "POST" }
+  );
+
+  let info = null;
+  try {
+    info = await res.json();
+  } catch (e) {
+    // ignore JSON parse errors
+  }
+
+  if (!res.ok) {
+    console.error("Failed to delete message", info && info.error);
+    return;
+  }
+
+  if (info && info.restorable !== false && info.message_id) {
+    state.lastDeleted = {
+      account: sel.account,
+      id: sel.id,
+      from_folder: info.from_folder || folder,
+      trash_folder: info.trash_folder || "Gel&APY-scht",
+      message_id: info.message_id,
+    };
+  } else {
+    state.lastDeleted = null;
+  }
+
+  const row = $(`.message-row[data-account="${CSS.escape(sel.account)}"][data-id="${CSS.escape(String(sel.id))}"]`);
+  if (row && row.parentElement) {
+    row.parentElement.removeChild(row);
+  }
+
+  state.selectedMessage = null;
+  $("#detailPane").innerHTML = `<div class="placeholder"><p>No Message Selected</p></div>`;
+
+  await loadInboxCounts();
+  await loadFolders();
+  await loadMessages(state.account);
+}
+
+async function restoreLastDeleted() {
+  const info = state.lastDeleted;
+  if (!info || !info.message_id) return;
+
+  const res = await fetch(
+    `/api/message/${encodeURIComponent(info.account)}/${encodeURIComponent(info.id)}/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from_folder: info.from_folder,
+        trash_folder: info.trash_folder,
+        message_id: info.message_id,
+      }),
+    }
+  );
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (e) {
+    // ignore
+  }
+
+  if (!res.ok) {
+    console.error("Failed to restore message", data && data.error);
+    return;
+  }
+
+  const originalFolder = info.from_folder;
+  state.lastDeleted = null;
+
+  await loadInboxCounts();
+  await loadFolders();
+  if (state.folder === originalFolder) {
+    await loadMessages(state.account);
+  }
 }
 
 // --- UI behaviors ---
@@ -273,8 +374,9 @@ function accountLabel(key) {
   return el ? el.textContent.replace(/\s+\d*$/, "").trim() : key;
 }
 
+// --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
-  // base ALL item
+  // "All" account
   $$('.nav-item[data-account="all"]').forEach(a => {
     a.addEventListener("click", () => setActiveAccount("all"));
   });
@@ -289,21 +391,60 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // delete button
+  const del = $("#deleteBtn");
+  if (del) {
+    del.addEventListener("click", () => {
+      deleteSelectedMessage();
+    });
+  }
+
+  // restore button
+  const restore = $("#restoreBtn");
+  if (restore) {
+    restore.addEventListener("click", () => {
+      restoreLastDeleted();
+    });
+  }
+
+  // keyboard shortcuts
+  document.addEventListener("keydown", (e) => {
+    const isMac = navigator.platform.toUpperCase().includes("MAC");
+
+    // DELETE / BACKSPACE -> delete selected message
+    if (state.selectedMessage && (e.key === "Delete" || e.key === "Backspace")) {
+      e.preventDefault();
+      deleteSelectedMessage();
+      return;
+    }
+
+    // UNDO: Cmd+Z on macOS, Ctrl+Z on others
+    const isZ = e.key === "z" || e.key === "Z";
+    const undoCombo =
+      (isMac && e.metaKey && !e.ctrlKey && isZ) ||  // ⌘+Z
+      (!isMac && e.ctrlKey && isZ);                 // Ctrl+Z
+
+    if (undoCombo) {
+      e.preventDefault();
+      restoreLastDeleted();
+    }
+  });
+
+  // click to open message
   $("#messageList").addEventListener("click", (e) => {
     const row = e.target.closest(".message-row");
     if (!row) return;
     openMessage(row.dataset.account, row.dataset.id);
   });
 
+  // initial load
   (async () => {
     await Promise.all([loadInboxCounts(), loadFolders()]);
 
     setActiveAccount("all");
-
     const inboxEl =
       document.querySelector('.folder-item[data-folder="INBOX"]') ||
       document.querySelector(".folder-item");
-
     if (inboxEl) {
       setActiveFolder(inboxEl.dataset.folder);
     } else {
@@ -314,28 +455,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // Example frontend function to send an email:
 async function sendEmail(subject, body, to_email) {
-    const response = await fetch('/api/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject, body, to_email })
-    });
-    
-    const data = await response.json();
-    
-    if (response.ok) {
-        alert("Email sent successfully!");
-    } else {
-        alert("Failed to send email: " + data.error);
-    }
+  const response = await fetch('/api/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subject, body, to_email })
+  });
+
+  const data = await response.json();
+
+  if (response.ok) {
+    alert("Email sent successfully!");
+  } else {
+    alert("Failed to send email: " + data.error);
+  }
 }
 
 async function fetchEmails() {
-    const response = await fetch('http://127.0.0.1:5000/api/messages');
-    const data = await response.json();
-    
-    if (response.ok) {
-        console.log("Fetched emails:", data);
-    } else {
-        console.log("Failed to fetch emails:", data.error);
-    }
+  const response = await fetch('/api/messages');
+  const data = await response.json();
+
+  if (response.ok) {
+    console.log("Fetched emails:", data);
+  } else {
+    console.log("Failed to fetch emails:", data.error);
+  }
 }

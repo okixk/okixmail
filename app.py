@@ -20,6 +20,7 @@ SMTP_SERVER = 'mail.gmx.com'
 SMTP_PORT = 587
 EMAIL_ACCOUNT = os.getenv('EMAIL_ACCOUNT')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+TRASH_MAILBOX = "Gel&APY-scht"
 
 app = Flask(__name__)
 
@@ -272,17 +273,27 @@ def api_folders():
 
 @app.route("/api/message/<account>/<id>", methods=["GET"])
 def api_message(account, id):
+    """
+    Return a single message (with HTML/plain body + attachment metadata).
+    """
+    imap = None
     try:
         folder = request.args.get("folder", "INBOX")
+        mark_read = request.args.get("mark_read") == "1"
 
         imap = connect_imap()
-        imap.select(folder)
+        typ, _ = imap.select(folder)
+        if typ != "OK":
+            imap.logout()
+            return jsonify({"error": f"Could not select folder {folder}"}), 500
+
         status, msg_data = imap.fetch(id, "(RFC822)")
-        if status != "OK" or not msg_data:
+        if status != "OK" or not msg_data or not msg_data[0]:
             imap.logout()
             return jsonify({"error": "Message not found"}), 404
 
         msg = email.message_from_bytes(msg_data[0][1])
+
         subject = decode_str(msg.get("Subject"))
         sender = decode_str(msg.get("From"))
         receiver = decode_str(msg.get("To", EMAIL_ACCOUNT))
@@ -302,60 +313,65 @@ def api_message(account, id):
                 disp = part.get_content_disposition()
                 filename = part.get_filename()
 
-                # anything with a filename is an attachment (attachment or inline)
+                # Attachments (attachment or inline with filename)
                 if filename and disp in ("attachment", "inline"):
-                    decoded_name = decode_str(filename)
-                    payload = part.get_payload(decode=True) or b""
+                    try:
+                        payload = part.get_payload(decode=True) or b""
+                    except Exception:
+                        payload = b""
                     attachments.append({
                         "index": len(attachments),
-                        "filename": decoded_name,
+                        "filename": decode_str(filename),
                         "content_type": ctype,
                         "size": len(payload),
                     })
                     continue
 
+                # Body (no filename)
                 if ctype == "text/plain" and not plain_body:
                     try:
-                        plain_body = part.get_payload(decode=True).decode(errors="ignore")
+                        plain_body = (part.get_payload(decode=True) or b"").decode(errors="ignore")
                     except Exception:
                         plain_body = ""
                 elif ctype == "text/html" and not html_body:
                     try:
-                        html_body = part.get_payload(decode=True).decode(errors="ignore")
+                        html_body = (part.get_payload(decode=True) or b"").decode(errors="ignore")
                     except Exception:
                         html_body = ""
         else:
             ctype = msg.get_content_type()
             disp = msg.get_content_disposition()
             filename = msg.get_filename()
-            payload = msg.get_payload(decode=True) or b""
+            body_bytes = msg.get_payload(decode=True) or b""
 
             if filename and disp in ("attachment", "inline"):
-                decoded_name = decode_str(filename)
                 attachments.append({
                     "index": 0,
-                    "filename": decoded_name,
+                    "filename": decode_str(filename),
                     "content_type": ctype,
-                    "size": len(payload),
+                    "size": len(body_bytes),
                 })
             else:
                 try:
-                    body_text = payload.decode(errors="ignore").strip()
-                    if ctype == "text/plain":
-                        plain_body = body_text
-                    elif ctype == "text/html":
-                        html_body = body_text
+                    text = body_bytes.decode(errors="ignore").strip()
                 except Exception:
-                    pass
+                    text = ""
+                if ctype == "text/plain":
+                    plain_body = text
+                elif ctype == "text/html":
+                    html_body = text
 
-        # Show HTML body if available, else plain text
         body = html_body or plain_body or ""
 
-        # mark as read in that folder
-        imap.store(id, "+FLAGS", "\\Seen")
-        imap.expunge()
-        imap.logout()
+        # mark as read if requested
+        if mark_read:
+            try:
+                imap.store(id, "+FLAGS", "\\Seen")
+                imap.expunge()
+            except Exception:
+                pass
 
+        imap.logout()
         return jsonify({
             "subject": subject,
             "sender": sender,
@@ -367,6 +383,137 @@ def api_message(account, id):
             "attachments": attachments,
         })
     except Exception as e:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/message/<account>/<id>/delete", methods=["POST"])
+def api_delete_message(account, id):
+    """
+    'Delete' a message by moving it to the GMX trash folder (Gelöscht)
+    and then removing it from the current folder.
+
+    Returns metadata (original folder + Message-ID) so the client
+    can later restore it.
+    """
+    imap = None
+    try:
+        folder = request.args.get("folder", "INBOX")
+
+        imap = connect_imap()
+        # Select the current folder (where the message lives now)
+        typ, _ = imap.select(folder)
+        if typ != "OK":
+            imap.logout()
+            return jsonify({"error": f"Could not select folder {folder}"}), 500
+
+        trash_folder = TRASH_MAILBOX
+
+        # Grab Message-ID from header so we can find the copy in trash later
+        message_id = None
+        try:
+            typ, data = imap.fetch(id, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            if typ == "OK" and data and data[0]:
+                header_bytes = data[0][1]
+                header_msg = email.message_from_bytes(header_bytes)
+                message_id = header_msg.get("Message-ID")
+        except Exception:
+            message_id = None
+
+        # Are we deleting from a "normal" folder or directly from trash?
+        restorable = folder != trash_folder
+
+        # If we're not already in the trash, copy the message there first
+        if restorable:
+            copy_typ, _ = imap.copy(id, trash_folder)
+            if copy_typ != "OK":
+                imap.logout()
+                return jsonify({"error": "Could not move message to trash"}), 500
+
+        # Now mark the message as deleted in the current folder
+        imap.store(id, "+FLAGS", r"(\Deleted)")
+        imap.expunge()
+        imap.logout()
+
+        return jsonify({
+            "status": "moved_to_trash" if restorable else "deleted_from_trash",
+            "id": id,
+            "from_folder": folder,
+            "trash_folder": trash_folder,
+            "message_id": message_id,
+            "restorable": restorable,
+        })
+    except Exception as e:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/message/<account>/<id>/restore", methods=["POST"])
+def api_restore_message(account, id):
+    """
+    Restore a message from the trash folder back to its original folder.
+
+    Expects JSON body:
+      { "from_folder": "...", "trash_folder": "...", "message_id": "..." }
+    """
+    imap = None
+    try:
+        data = request.json or {}
+        from_folder = data.get("from_folder") or "INBOX"
+        trash_folder = data.get("trash_folder") or TRASH_MAILBOX
+        message_id = data.get("message_id")
+
+        if not message_id:
+            return jsonify({"error": "Missing message_id"}), 400
+
+        imap = connect_imap()
+
+        # Look for the message in trash by Message-ID header
+        typ, _ = imap.select(trash_folder)
+        if typ != "OK":
+            imap.logout()
+            return jsonify({"error": f"Could not select trash folder {trash_folder}"}), 500
+
+        mid = message_id.replace('"', "").strip()
+        search_crit = f'"{mid}"'
+        typ, search_data = imap.search(None, "HEADER", "Message-ID", search_crit)
+        if typ != "OK" or not search_data or not search_data[0]:
+            imap.logout()
+            return jsonify({"error": "Message not found in trash"}), 404
+
+        # If multiple hits, use the last one
+        candidates = search_data[0].split()
+        msg_seq = candidates[-1].decode() if isinstance(candidates[-1], (bytes, bytearray)) else str(candidates[-1])
+
+        # Copy back to the original folder
+        typ, _ = imap.copy(msg_seq, from_folder)
+        if typ != "OK":
+            imap.logout()
+            return jsonify({"error": "Could not copy message back to folder"}), 500
+
+        # Remove it from trash
+        imap.store(msg_seq, "+FLAGS", r"(\Deleted)")
+        imap.expunge()
+        imap.logout()
+
+        return jsonify({
+            "status": "restored",
+            "from_folder": from_folder,
+            "trash_folder": trash_folder,
+        })
+    except Exception as e:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/message/<account>/<id>/attachment/<int:att_index>", methods=["GET"])
