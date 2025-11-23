@@ -3,9 +3,10 @@ const state = {
   account: "all",
   folder: "INBOX",
   baseTitle: document.title,
-  selectedMessage: null, // currently opened / selected mail
-  lastDeleted: null,     // info for "restore last deleted"
+  selectedMessage: null,
+  lastDeleted: null,
 };
+const TRASH_KEY = "Gel&APY-scht";
 
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -68,6 +69,13 @@ function renderAccounts(accounts) {
 }
 
 // --- Sidebar (folders) ---
+function trashIconSvg() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M9 3h6l1 2h4v2H4V5h4l1-2z"></path>
+    <path d="M6 9h12l-1 11H7L6 9z"></path>
+  </svg>`;
+}
+
 function folderIconSvg() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"></path>
@@ -79,15 +87,24 @@ function renderFolders(folders) {
   const wrap = $("#folderList");
   if (!wrap) return;
 
-  wrap.innerHTML = folders.map(f => `
-    <a class="nav-item folder-item" data-folder="${escapeHtml(f.key)}">
-      ${folderIconSvg()}
-      ${escapeHtml(f.label || f.key)}
-      <span class="badge" data-folder-count="${escapeHtml(f.key)}">
-        ${f.count ? String(f.count) : ""}
-      </span>
-    </a>
-  `).join("");
+  wrap.innerHTML = folders.map(f => {
+    const label = f.label || f.key || "";
+    const isTrash =
+      f.key === TRASH_KEY ||
+      /gelöscht/i.test(label);
+
+    const icon = isTrash ? trashIconSvg() : folderIconSvg();
+
+    return `
+      <a class="nav-item folder-item" data-folder="${escapeHtml(f.key)}">
+        ${icon}
+        ${escapeHtml(label)}
+        <span class="badge" data-folder-count="${escapeHtml(f.key)}">
+          ${f.count ? String(f.count) : ""}
+        </span>
+      </a>
+    `;
+  }).join("");
 
   $$(".folder-item").forEach(a => {
     a.addEventListener("click", () => setActiveFolder(a.dataset.folder));
