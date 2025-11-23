@@ -4,6 +4,7 @@ import base64
 import imaplib
 import smtplib
 import email
+import time
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -50,6 +51,23 @@ def html_to_text(html):
     text = re.sub('&quot;', '"', text)
     return text.strip()
 
+def parse_priority_header(msg):
+    parts = [
+        msg.get("X-Priority") or "",
+        msg.get("Priority") or "",
+        msg.get("Importance") or "",
+        msg.get("X-MSMail-Priority") or "",
+    ]
+    raw = " ".join(parts).lower()
+    if not raw.strip():
+        return "normal"
+
+    if "high" in raw or raw.strip().startswith(("1", "2")) or "urgent" in raw:
+        return "high"
+    if "low" in raw or raw.strip().startswith(("4", "5")) or "non-urgent" in raw:
+        return "low"
+    return "normal"
+
 def fetch_emails(imap, mailbox="INBOX"):
     """
     Fetch latest emails from the given IMAP mailbox.
@@ -75,6 +93,9 @@ def fetch_emails(imap, mailbox="INBOX"):
             date_fmt = parsedate_to_datetime(date_str).strftime("%Y-%m-%d %H:%M") if date_str else ""
         except Exception:
             date_fmt = ""
+
+        # Priority
+        priority = parse_priority_header(msg)
 
         # Extract the body (prefer plain text, otherwise html)
         plain_body = ""
@@ -103,12 +124,9 @@ def fetch_emails(imap, mailbox="INBOX"):
                     elif ctype == "text/html":
                         html_body = body
             except Exception:
-                pass
+                body = ""
 
-        # Use plain_body if available, else html_body for main content
         body = plain_body or html_body or ""
-
-        # For preview, always use text-only version
         preview = (html_to_text(body).replace("\n", " ").strip()[:90] + "...") if body else ""
 
         emails.append({
@@ -118,7 +136,8 @@ def fetch_emails(imap, mailbox="INBOX"):
             "preview": preview,
             "unread": is_unread,
             "date_str": date_fmt,
-            "account": "gmx"
+            "account": "gmx",
+            "priority": priority,
         })
     return emails
 
@@ -235,6 +254,26 @@ def list_folders_with_counts(imap):
 
     return folders
 
+def find_sent_mailbox(imap):
+    """
+    Try to find a 'Sent' / 'Gesendet' folder by name.
+    Returns the encoded IMAP name (key) to use with APPEND.
+    Falls back to INBOX if nothing obvious is found.
+    """
+    status, data = imap.list()
+    if status != "OK" or not data:
+        return "INBOX"
+
+    for raw in data:
+        encoded_name = _parse_mailbox_name(raw)
+        if not encoded_name:
+            continue
+
+        label = decode_imap_utf7(encoded_name).lower()
+        if "gesendet" in label or "sent" in label:
+            return encoded_name
+    return "INBOX"
+
 @app.route("/api/messages", methods=["GET"])
 def api_messages():
     try:
@@ -274,7 +313,7 @@ def api_folders():
 @app.route("/api/message/<account>/<id>", methods=["GET"])
 def api_message(account, id):
     """
-    Return a single message (with HTML/plain body + attachment metadata).
+    Return a single message (with HTML/plain body + attachment metadata + priority).
     """
     imap = None
     try:
@@ -302,6 +341,9 @@ def api_message(account, id):
             date_fmt = parsedate_to_datetime(date_str).strftime("%Y-%m-%d %H:%M")
         except Exception:
             date_fmt = date_str
+
+        # Priority
+        priority = parse_priority_header(msg)
 
         plain_body = ""
         html_body = ""
@@ -363,7 +405,6 @@ def api_message(account, id):
 
         body = html_body or plain_body or ""
 
-        # mark as read if requested
         if mark_read:
             try:
                 imap.store(id, "+FLAGS", "\\Seen")
@@ -381,6 +422,7 @@ def api_message(account, id):
             "account_label": "GMX",
             "folder": folder,
             "attachments": attachments,
+            "priority": priority,
         })
     except Exception as e:
         if imap is not None:
@@ -578,22 +620,70 @@ def api_send():
     data = request.json or {}
     to = data.get("to")
     subject = data.get("subject", "")
-    body = data.get("body", "")
+    priority = (data.get("priority") or "normal").lower()
+
+    body_html = data.get("body_html")
+    body_text = data.get("body_text")
+    legacy_body = data.get("body", "")
+
     if not to:
         return jsonify({"error": "Missing 'to' field"}), 400
 
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_ACCOUNT
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
+    if body_html:
+        if not body_text:
+            body_text = html_to_text(body_html)
+
+        msg = MIMEMultipart("alternative")
+        msg["From"] = EMAIL_ACCOUNT
+        msg["To"] = to
+        msg["Subject"] = subject
+
+        msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
+    else:
+        body_text = body_text or legacy_body or ""
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_ACCOUNT
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+
+    # Priority headers
+    if priority == "high":
+        msg["X-Priority"] = "1 (High)"
+        msg["Importance"] = "High"
+    elif priority == "low":
+        msg["X-Priority"] = "5 (Low)"
+        msg["Importance"] = "Low"
+    else:
+        msg["X-Priority"] = "3 (Normal)"
+        msg["Importance"] = "Normal"
+
+    # Serialize once so we can reuse for SMTP + IMAP APPEND
+    raw_msg_bytes = msg.as_bytes()
 
     try:
+        # --- Send via SMTP ---
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_ACCOUNT, to, msg.as_string())
+        server.sendmail(EMAIL_ACCOUNT, to, raw_msg_bytes)
         server.quit()
+
+        # --- Save a copy in "Sent" over IMAP ---
+        try:
+            imap = connect_imap()
+            sent_mailbox = find_sent_mailbox(imap)
+            imap.append(
+                sent_mailbox,
+                "\\Seen",
+                imaplib.Time2Internaldate(time.time()),
+                raw_msg_bytes,
+            )
+            imap.logout()
+        except Exception:
+            pass
+
         return jsonify({"status": "sent"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

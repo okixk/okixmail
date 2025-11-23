@@ -46,6 +46,160 @@ function formatBytes(bytes) {
   return `${fixed} ${units[u]}`;
 }
 
+function prioritySymbol(p) {
+  if (p === "high") return "!!";
+  if (p === "low") return "-";
+  return "!"; // normal
+}
+
+function priorityLabel(p) {
+  if (p === "high") return "High";
+  if (p === "low") return "Low";
+  return "Normal";
+}
+
+// --- Compose ("Write") ---
+function openCompose() {
+  // No selected message while composing
+  state.selectedMessage = null;
+
+  const pane = document.getElementById("detailPane");
+  if (!pane) return;
+
+  pane.innerHTML = `
+    <article class="compose-view">
+      <header class="compose-head">
+        <div class="compose-title">New message</div>
+        <div class="compose-head-actions">
+          <button id="composeCloseBtn" class="icon-btn small" aria-label="Close compose">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke-width="2" stroke="currentColor" fill="none" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="compose-fields">
+        <div class="compose-field">
+          <label for="composeTo">To</label>
+          <input id="composeTo" type="email" placeholder="recipient@example.com" autocomplete="email" />
+        </div>
+        <div class="compose-field">
+          <label for="composeSubject">Subject</label>
+          <input id="composeSubject" type="text" placeholder="Subject" />
+        </div>
+        <div class="compose-field">
+          <label for="composePriority">Priority</label>
+          <select id="composePriority">
+            <option value="high">!! High</option>
+            <option value="normal" selected>! Normal</option>
+            <option value="low">- Low</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="compose-toolbar" aria-label="Formatting toolbar">
+        <button type="button" data-cmd="bold"><strong>B</strong></button>
+        <button type="button" data-cmd="italic"><em>I</em></button>
+        <button type="button" data-cmd="underline"><span style="text-decoration:underline;">U</span></button>
+        <span class="toolbar-separator"></span>
+        <button type="button" data-cmd="insertUnorderedList">• List</button>
+        <button type="button" data-cmd="insertOrderedList">1. List</button>
+      </div>
+
+      <div id="composeEditor" class="compose-editor" contenteditable="true"></div>
+
+      <footer class="compose-foot">
+        <button id="composeSendBtn" class="primary-btn">Send</button>
+      </footer>
+    </article>
+  `;
+
+  const editor = document.getElementById("composeEditor");
+  if (editor) {
+    editor.focus();
+  }
+
+  // formatting buttons
+  $$(".compose-toolbar button[data-cmd]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const cmd = btn.dataset.cmd;
+      if (!cmd) return;
+      if (editor) editor.focus();
+      document.execCommand(cmd, false, null);
+    });
+  });
+
+  // send
+  const sendBtn = document.getElementById("composeSendBtn");
+  if (sendBtn) {
+    sendBtn.addEventListener("click", sendCurrentCompose);
+  }
+
+  // close / discard
+  const closeBtn = document.getElementById("composeCloseBtn");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      pane.innerHTML = `<div class="placeholder"><p>No Message Selected</p></div>`;
+    });
+  }
+}
+
+async function sendCurrentCompose() {
+  const toInput = document.getElementById("composeTo");
+  const subjectInput = document.getElementById("composeSubject");
+  const editor = document.getElementById("composeEditor");
+
+  const prioritySelect = document.getElementById("composePriority");
+  const priority = prioritySelect ? prioritySelect.value : "normal";
+
+  const to = toInput ? toInput.value.trim() : "";
+  const subject = subjectInput ? subjectInput.value || "" : "";
+  const bodyHtml = editor ? editor.innerHTML : "";
+  const bodyText = editor ? editor.innerText : "";
+
+  if (!to) {
+    alert("Please enter a recipient address.");
+    if (toInput) toInput.focus();
+    return;
+  }
+
+  const payload = {
+    to,
+    subject,
+    body_html: bodyHtml,
+    body_text: bodyText,
+    priority,
+  };
+
+  let res, data;
+  try {
+    res = await fetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (err) {
+    alert("Failed to send email: network error");
+    return;
+  }
+
+  if (!res.ok || (data && data.error)) {
+    alert("Failed to send email: " + (data && data.error ? data.error : res.statusText));
+    return;
+  }
+
+  // After sending: refresh inbox + show small confirmation
+  await loadInboxCounts();
+  await loadMessages(state.account);
+
+  const pane = document.getElementById("detailPane");
+  if (pane) {
+    pane.innerHTML = `<div class="placeholder"><p>Message sent</p></div>`;
+  }
+}
+
 // --- Sidebar (accounts) ---
 function accountIconSvg() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -170,22 +324,54 @@ async function loadMessages(account) {
   const count = $("#messageCount");
 
   list.classList.toggle("empty", msgs.length === 0);
-  list.innerHTML = msgs.length
-    ? msgs.map(m => `
-        <li class="message-row ${m.unread ? "unread" : ""}"
-            data-id="${m.id}" data-account="${m.account}">
-          <div class="top">
-            <span class="dot"></span>
-            <span class="sender">${escapeHtml(m.sender || "")}</span>
-            <span class="meta">${escapeHtml(m.date_str || "")}</span>
-          </div>
-          <div class="subject">${escapeHtml(m.subject || "")}</div>
-          <div class="preview">${escapeHtml(m.preview || "")}</div>
-        </li>
-      `).join("")
+  const itemsHtml = msgs.length
+    ? msgs.map(m => {
+        const pr = m.priority || "normal";
+        const prSym = prioritySymbol(pr);
+        const prSpan = prSym ? `<span class="priority">${escapeHtml(prSym)}</span>` : "";
+        return `
+          <li class="message-row ${m.unread ? "unread" : ""}"
+              data-id="${m.id}" data-account="${m.account}">
+            <div class="top">
+              <span class="dot"></span>
+              ${prSpan}
+              <span class="sender">${escapeHtml(m.sender || "")}</span>
+              <span class="meta">${escapeHtml(m.date_str || "")}</span>
+            </div>
+            <div class="subject">${escapeHtml(m.subject || "")}</div>
+            <div class="preview">${escapeHtml(m.preview || "")}</div>
+          </li>
+        `;
+      }).join("")
     : '<li class="empty-state">No Mail</li>';
 
+  list.innerHTML = itemsHtml;
   count.textContent = `${msgs.length} ${msgs.length === 1 ? "Message" : "Messages"}`;
+}
+
+function ensureMessageSelected() {
+  if (document.querySelector(".compose-view")) return;
+
+  const list = $("#messageList");
+  if (!list) return;
+
+  if (state.selectedMessage) {
+    const existing = $(
+      `.message-row[data-account="${CSS.escape(state.selectedMessage.account)}"][data-id="${CSS.escape(String(state.selectedMessage.id))}"]`
+    );
+    if (existing) return;
+  }
+
+  const firstRow = list.querySelector(".message-row");
+  if (firstRow) {
+    openMessage(firstRow.dataset.account, firstRow.dataset.id);
+  } else {
+    const pane = $("#detailPane");
+    if (pane) {
+      pane.innerHTML = `<div class="placeholder"><p>No Message Selected</p></div>`;
+    }
+    state.selectedMessage = null;
+  }
 }
 
 // --- Detail view / attachments ---
@@ -202,6 +388,19 @@ async function openMessage(account, id) {
 
   const msg = await res.json();
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+
+  // priority (only show high/low)
+  const pr = msg.priority || "normal";
+  const priorityInfo =
+    pr && pr !== "normal"
+      ? ` • ${escapeHtml(prioritySymbol(pr) + " " + priorityLabel(pr))}`
+      : "";
+
+  // folder name (e.g. INBOX, Gesendet)
+  const folderName = folderLabel(msg.folder || state.folder || "");
+  const folderInfo = folderName
+    ? ` • ${escapeHtml(folderName)}`
+    : "";
 
   const attachmentsHtml = attachments.length
     ? `
@@ -236,6 +435,8 @@ async function openMessage(account, id) {
           → ${escapeHtml(msg.to || "")}
           • ${escapeHtml(msg.date_str || "")}
           ${msg.account_label ? " • " + escapeHtml(msg.account_label) : ""}
+          ${folderInfo}
+          ${priorityInfo}
         </div>
       </header>
       <div class="detail-body">
@@ -306,6 +507,7 @@ async function deleteSelectedMessage() {
   await loadInboxCounts();
   await loadFolders();
   await loadMessages(state.account);
+  ensureMessageSelected();
 }
 
 async function restoreLastDeleted() {
@@ -360,7 +562,9 @@ function setActiveAccount(account) {
   } else {
     $("#mailboxTitle").textContent =
       `Inbox — ${account === "all" ? "All" : accountLabel(account)}`;
-    loadMessages(account);
+    loadMessages(account).then(() => {
+      ensureMessageSelected();
+    });
   }
 }
 
@@ -383,7 +587,9 @@ function setActiveFolder(folderKey) {
     a.classList.toggle("active", a.dataset.folder === state.folder);
   });
 
-  loadMessages(state.account);
+  loadMessages(state.account).then(() => {
+    ensureMessageSelected();
+  });
 }
 
 function accountLabel(key) {
@@ -401,10 +607,19 @@ document.addEventListener("DOMContentLoaded", () => {
   // refresh
   const r = $("#refreshBtn");
   if (r) {
-    r.addEventListener("click", () => {
+    r.addEventListener("click", async () => {
       spinRefresh();
-      loadMessages(state.account);
-      loadFolders();
+      await loadMessages(state.account);
+      await loadFolders();
+      ensureMessageSelected();
+    });
+  }
+
+  // compose / write
+  const composeBtn = $("#composeBtn");
+  if (composeBtn) {
+    composeBtn.addEventListener("click", () => {
+      openCompose();
     });
   }
 
@@ -427,9 +642,14 @@ document.addEventListener("DOMContentLoaded", () => {
   // keyboard shortcuts
   document.addEventListener("keydown", (e) => {
     const isMac = navigator.platform.toUpperCase().includes("MAC");
+    const active = document.activeElement;
+    const inCompose =
+      active &&
+      typeof active.closest === "function" &&
+      active.closest(".compose-view");
 
-    // DELETE / BACKSPACE -> delete selected message
-    if (state.selectedMessage && (e.key === "Delete" || e.key === "Backspace")) {
+    // DELETE / BACKSPACE -> delete selected message (but not while composing)
+    if (!inCompose && state.selectedMessage && (e.key === "Delete" || e.key === "Backspace")) {
       e.preventDefault();
       deleteSelectedMessage();
       return;
@@ -441,7 +661,8 @@ document.addEventListener("DOMContentLoaded", () => {
       (isMac && e.metaKey && !e.ctrlKey && isZ) ||  // ⌘+Z
       (!isMac && e.ctrlKey && isZ);                 // Ctrl+Z
 
-    if (undoCombo) {
+    // Don't steal undo inside the editor; let browser handle text undo there
+    if (undoCombo && !inCompose) {
       e.preventDefault();
       restoreLastDeleted();
     }
@@ -465,7 +686,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (inboxEl) {
       setActiveFolder(inboxEl.dataset.folder);
     } else {
-      loadMessages(state.account);
+      await loadMessages(state.account);
+      ensureMessageSelected();
     }
   })();
 });
@@ -475,7 +697,12 @@ async function sendEmail(subject, body, to_email) {
   const response = await fetch('/api/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ subject, body, to_email })
+    body: JSON.stringify({
+      subject,
+      to: to_email,
+      body_text: body,
+      body_html: body,
+    })
   });
 
   const data = await response.json();
