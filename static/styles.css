@@ -180,6 +180,24 @@ body{
   white-space: pre-wrap; color:var(--text);
 }
 
+.detail-body-content{
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.detail-body-content.email-light{
+  background:#fff;
+  color:#000;
+  border-radius:12px;
+  padding:16px 18px;
+  box-shadow: var(--shadow);
+}
+
+.detail-body-content img{
+  max-width:100%;
+  height:auto;
+}
+
 .attachment-bar{
   display:flex;
   flex-wrap:wrap;
@@ -293,6 +311,37 @@ body{
 .compose-field input:focus{
   border-color:var(--ring);
   box-shadow:0 0 0 2px rgba(74,163,255,.2);
+}
+
+.compose-field select{
+  height:28px;
+  border-radius:8px;
+  border:1px solid var(--border);
+  background:var(--bg);
+  color:var(--text);
+  padding:4px 8px;
+  outline:none;
+}
+
+.compose-field select:focus{
+  border-color:var(--ring);
+  box-shadow:0 0 0 2px rgba(74,163,255,.2);
+}
+
+/* Subject + priority side by side */
+.subject-with-priority{
+  flex:1;
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.subject-with-priority input{
+  flex:1;
+}
+
+.priority-select{
+  min-width:120px;
 }
 
 .compose-toolbar{

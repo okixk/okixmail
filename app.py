@@ -618,7 +618,26 @@ def api_attachment(account, id, att_index):
 @app.route("/api/send", methods=["POST"])
 def api_send():
     data = request.json or {}
-    to = data.get("to")
+
+    def parse_addr_list(raw):
+        """Accept comma/semicolon-separated strings or lists."""
+        if not raw:
+            return []
+        if isinstance(raw, (list, tuple)):
+            parts = []
+            for item in raw:
+                if not item:
+                    continue
+                parts.extend(str(item).replace(";", ",").split(","))
+        else:
+            parts = str(raw).replace(";", ",").split(",")
+
+        return [p.strip() for p in parts if p.strip()]
+
+    to_list = parse_addr_list(data.get("to"))
+    cc_list = parse_addr_list(data.get("cc"))
+    bcc_list = parse_addr_list(data.get("bcc"))
+
     subject = data.get("subject", "")
     priority = (data.get("priority") or "normal").lower()
 
@@ -626,8 +645,10 @@ def api_send():
     body_text = data.get("body_text")
     legacy_body = data.get("body", "")
 
-    if not to:
-        return jsonify({"error": "Missing 'to' field"}), 400
+    if not (to_list or cc_list or bcc_list):
+        return jsonify(
+            {"error": "At least one recipient (To, Cc or Bcc) is required"}
+        ), 400
 
     if body_html:
         if not body_text:
@@ -635,7 +656,10 @@ def api_send():
 
         msg = MIMEMultipart("alternative")
         msg["From"] = EMAIL_ACCOUNT
-        msg["To"] = to
+        if to_list:
+            msg["To"] = ", ".join(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
         msg["Subject"] = subject
 
         msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
@@ -644,7 +668,10 @@ def api_send():
         body_text = body_text or legacy_body or ""
         msg = MIMEMultipart()
         msg["From"] = EMAIL_ACCOUNT
-        msg["To"] = to
+        if to_list:
+            msg["To"] = ", ".join(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
         msg["Subject"] = subject
         msg.attach(MIMEText(body_text, "plain", "utf-8"))
 
@@ -659,6 +686,11 @@ def api_send():
         msg["X-Priority"] = "3 (Normal)"
         msg["Importance"] = "Normal"
 
+    # All recipients (Bcc only lives here, not in headers)
+    recipients = to_list + cc_list + bcc_list
+    if not recipients:
+        recipients = [EMAIL_ACCOUNT]
+
     # Serialize once so we can reuse for SMTP + IMAP APPEND
     raw_msg_bytes = msg.as_bytes()
 
@@ -667,7 +699,7 @@ def api_send():
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_ACCOUNT, to, raw_msg_bytes)
+        server.sendmail(EMAIL_ACCOUNT, recipients, raw_msg_bytes)
         server.quit()
 
         # --- Save a copy in "Sent" over IMAP ---

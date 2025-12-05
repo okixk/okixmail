@@ -46,10 +46,39 @@ function formatBytes(bytes) {
   return `${fixed} ${units[u]}`;
 }
 
+function needsLightBodyBackground(html) {
+  if (!html) return false;
+  const lower = String(html).toLowerCase();
+
+  const hasDarkText =
+    lower.includes("color:#000") ||
+    lower.includes("color: #000") ||
+    lower.includes("color:#000000") ||
+    lower.includes("color:#111") ||
+    lower.includes("color:#202124") ||
+    lower.includes("color: rgb(0,0,0)") ||
+    lower.includes("color:rgb(0,0,0)");
+
+  const hasDarkBackground =
+    lower.includes("background-color:#000") ||
+    lower.includes("background-color: #000") ||
+    lower.includes("background:#000") ||
+    lower.includes("background: #000") ||
+    lower.includes("background-color:#111") ||
+    lower.includes("background-color:#1a1a1a") ||
+    lower.includes("background:#111") ||
+    lower.includes("background:#1a1a1a");
+
+  if (!hasDarkText) return false;
+  if (hasDarkBackground) return false;
+
+  return true;
+}
+
 function prioritySymbol(p) {
   if (p === "high") return "!!";
   if (p === "low") return "-";
-  return "!"; // normal
+  return "";
 }
 
 function priorityLabel(p) {
@@ -85,16 +114,23 @@ function openCompose() {
           <input id="composeTo" type="email" placeholder="recipient@example.com" autocomplete="email" />
         </div>
         <div class="compose-field">
-          <label for="composeSubject">Subject</label>
-          <input id="composeSubject" type="text" placeholder="Subject" />
+          <label for="composeCc">Cc</label>
+          <input id="composeCc" type="text" placeholder="Optional – comma-separated" />
         </div>
         <div class="compose-field">
-          <label for="composePriority">Priority</label>
-          <select id="composePriority">
-            <option value="high">!! High</option>
-            <option value="normal" selected>! Normal</option>
-            <option value="low">- Low</option>
-          </select>
+          <label for="composeBcc">Bcc</label>
+          <input id="composeBcc" type="text" placeholder="Optional – comma-separated" />
+        </div>
+        <div class="compose-field compose-subject-row">
+          <label for="composeSubject">Subject</label>
+          <div class="subject-with-priority">
+            <input id="composeSubject" type="text" placeholder="Subject" />
+            <select id="composePriority" class="priority-select" aria-label="Priority">
+              <option value="high">!! High</option>
+              <option value="normal" selected>! Normal</option>
+              <option value="low">- Low</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -147,6 +183,8 @@ function openCompose() {
 
 async function sendCurrentCompose() {
   const toInput = document.getElementById("composeTo");
+  const ccInput = document.getElementById("composeCc");
+  const bccInput = document.getElementById("composeBcc");
   const subjectInput = document.getElementById("composeSubject");
   const editor = document.getElementById("composeEditor");
 
@@ -154,18 +192,22 @@ async function sendCurrentCompose() {
   const priority = prioritySelect ? prioritySelect.value : "normal";
 
   const to = toInput ? toInput.value.trim() : "";
+  const cc = ccInput ? ccInput.value.trim() : "";
+  const bcc = bccInput ? bccInput.value.trim() : "";
   const subject = subjectInput ? subjectInput.value || "" : "";
   const bodyHtml = editor ? editor.innerHTML : "";
   const bodyText = editor ? editor.innerText : "";
 
-  if (!to) {
-    alert("Please enter a recipient address.");
+  if (!to && !cc && !bcc) {
+    alert("Please enter at least one recipient (To, Cc or Bcc).");
     if (toInput) toInput.focus();
     return;
   }
 
   const payload = {
     to,
+    cc,
+    bcc,
     subject,
     body_html: bodyHtml,
     body_text: bodyText,
@@ -389,12 +431,11 @@ async function openMessage(account, id) {
   const msg = await res.json();
   const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
 
-  // priority (only show high/low)
+  // priority (always show)
   const pr = msg.priority || "normal";
-  const priorityInfo =
-    pr && pr !== "normal"
-      ? ` • ${escapeHtml(prioritySymbol(pr) + " " + priorityLabel(pr))}`
-      : "";
+  const priorityInfo = pr
+    ? ` • Priority: ${escapeHtml(priorityLabel(pr))}`
+    : "";
 
   // folder name (e.g. INBOX, Gesendet)
   const folderName = folderLabel(msg.folder || state.folder || "");
@@ -441,7 +482,9 @@ async function openMessage(account, id) {
       </header>
       <div class="detail-body">
         ${attachmentsHtml}
-        <div class="detail-body-content">
+        <div class="${needsLightBodyBackground(msg.body)
+          ? "detail-body-content email-light"
+          : "detail-body-content"}">
           ${msg.body || ""}
         </div>
       </div>
