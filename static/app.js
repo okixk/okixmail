@@ -152,31 +152,31 @@ function openCompose() {
   `;
 
   const editor = document.getElementById("composeEditor");
-  if (editor) {
-    editor.focus();
-  }
+  const attachmentsBox = document.getElementById("composeAttachments");
 
-  // formatting buttons
-  $$(".compose-toolbar button[data-cmd]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const cmd = btn.dataset.cmd;
-      if (!cmd) return;
-      if (editor) editor.focus();
-      document.execCommand(cmd, false, null);
+  if (editor && attachmentsBox) {
+    editor.addEventListener("dragover", (e) => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        attachmentsBox.classList.add("drag-over");
+      }
     });
-  });
 
-  // send
-  const sendBtn = document.getElementById("composeSendBtn");
-  if (sendBtn) {
-    sendBtn.addEventListener("click", sendCurrentCompose);
-  }
+    editor.addEventListener("dragleave", () => {
+      attachmentsBox.classList.remove("drag-over");
+    });
 
-  // close / discard
-  const closeBtn = document.getElementById("composeCloseBtn");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", () => {
-      pane.innerHTML = `<div class="placeholder"><p>No Message Selected</p></div>`;
+    editor.addEventListener("drop", (e) => {
+      if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0)) {
+        return;
+      }
+
+      e.preventDefault();
+      attachmentsBox.classList.remove("drag-over");
+
+      const files = Array.from(e.dataTransfer.files);
+      files.forEach((file) => addComposeAttachment(file));
     });
   }
 }

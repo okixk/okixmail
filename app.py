@@ -6,6 +6,7 @@ import smtplib
 import email
 import time
 from email.header import decode_header
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
@@ -50,6 +51,61 @@ def html_to_text(html):
     text = re.sub('&#39;', "'", text)
     text = re.sub('&quot;', '"', text)
     return text.strip()
+
+def extract_data_uri_attachments_from_html(html):
+    """
+    Find <img src="data:..."> in HTML, strip them out, and return
+    (attachments, cleaned_html).
+
+    Attachments are dicts with: filename, content_type, data (base64 string).
+    """
+    if not html:
+        return [], html
+
+    attachments = []
+
+    def repl(match):
+        src = match.group(1)
+        if not src.lower().startswith("data:"):
+            return ""
+
+        try:
+            header, b64data = src.split(",", 1)
+        except ValueError:
+            return ""
+
+        # header looks like: data:image/png;base64
+        header = header[5:]  # drop "data:"
+        mime_type = "application/octet-stream"
+        if ";base64" in header:
+            mime_type = header.split(";")[0] or mime_type
+        elif header:
+            mime_type = header
+
+        # map mime -> extension
+        ext_map = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/jpg": "jpg",
+            "image/gif": "gif",
+            "image/webp": "webp",
+            "image/svg+xml": "svg",
+        }
+        idx = len(attachments) + 1
+        ext = ext_map.get(mime_type, "bin")
+        filename = f"image-{idx}.{ext}"
+
+        attachments.append({
+            "filename": filename,
+            "content_type": mime_type,
+            "data": b64data,
+        })
+
+        return f"[image {idx}]"
+
+    pattern = r'<img\b[^>]*\bsrc=["\'](data:[^"\']+)["\'][^>]*>'
+    cleaned_html = re.sub(pattern, repl, html, flags=re.IGNORECASE)
+    return attachments, cleaned_html
 
 def parse_priority_header(msg):
     parts = [
@@ -645,37 +701,54 @@ def api_send():
     body_text = data.get("body_text")
     legacy_body = data.get("body", "")
 
+    attachments_json = data.get("attachments") or []
+
+    extra_inline_attachments = []
+    if body_html:
+        extra_inline_attachments, body_html = extract_data_uri_attachments_from_html(body_html)
+
+    if extra_inline_attachments:
+        attachments_json.extend(extra_inline_attachments)
+
     if not (to_list or cc_list or bcc_list):
         return jsonify(
             {"error": "At least one recipient (To, Cc or Bcc) is required"}
         ), 400
 
-    if body_html:
+    has_html = bool(body_html)
+    has_attachments = bool(attachments_json)
+
+    # ---- Build message structure ----
+    if has_html:
+        # Create the alternative part (plain + HTML)
         if not body_text:
             body_text = html_to_text(body_html)
 
-        msg = MIMEMultipart("alternative")
-        msg["From"] = EMAIL_ACCOUNT
-        if to_list:
-            msg["To"] = ", ".join(to_list)
-        if cc_list:
-            msg["Cc"] = ", ".join(cc_list)
-        msg["Subject"] = subject
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body_text or "", "plain", "utf-8"))
+        alt.attach(MIMEText(body_html, "html", "utf-8"))
 
-        msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
-        msg.attach(MIMEText(body_html, "html", "utf-8"))
+        if has_attachments:
+            msg = MIMEMultipart("mixed")
+            msg.attach(alt)
+        else:
+            msg = alt
     else:
         body_text = body_text or legacy_body or ""
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_ACCOUNT
-        if to_list:
-            msg["To"] = ", ".join(to_list)
-        if cc_list:
-            msg["Cc"] = ", ".join(cc_list)
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        if has_attachments:
+            msg = MIMEMultipart("mixed")
+            msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
+        else:
+            msg = MIMEText(body_text or "", "plain", "utf-8")
 
-    # Priority headers
+    msg["From"] = EMAIL_ACCOUNT
+    if to_list:
+        msg["To"] = ", ".join(to_list)
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
+    msg["Subject"] = subject
+
+    # ---- Priority headers ----
     if priority == "high":
         msg["X-Priority"] = "1 (High)"
         msg["Importance"] = "High"
@@ -686,12 +759,32 @@ def api_send():
         msg["X-Priority"] = "3 (Normal)"
         msg["Importance"] = "Normal"
 
-    # All recipients (Bcc only lives here, not in headers)
+    # ---- Attach files ----
+    for att in attachments_json:
+        try:
+            filename = att.get("filename") or "attachment"
+            content_type = att.get("content_type") or "application/octet-stream"
+            data_b64 = att.get("data") or ""
+            if not data_b64:
+                continue
+
+            payload = base64.b64decode(data_b64)
+        except Exception:
+            continue
+
+        main_type, _, sub_type = content_type.partition("/")
+        if not sub_type:
+            sub_type = "octet-stream"
+
+        part = MIMEApplication(payload, _subtype=sub_type)
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+
+    # All recipients, including Bcc
     recipients = to_list + cc_list + bcc_list
     if not recipients:
         recipients = [EMAIL_ACCOUNT]
 
-    # Serialize once so we can reuse for SMTP + IMAP APPEND
     raw_msg_bytes = msg.as_bytes()
 
     try:
@@ -702,7 +795,7 @@ def api_send():
         server.sendmail(EMAIL_ACCOUNT, recipients, raw_msg_bytes)
         server.quit()
 
-        # --- Save a copy in "Sent" over IMAP ---
+        # --- Save copy to Sent (IMAP) ---
         try:
             imap = connect_imap()
             sent_mailbox = find_sent_mailbox(imap)
