@@ -3,10 +3,11 @@ import re
 import base64
 import imaplib
 import smtplib
-import email
 import time
+import email
+from email import policy, encoders
 from email.header import decode_header
-from email.mime.application import MIMEApplication
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
@@ -760,8 +761,13 @@ def api_send():
             body_text = html_to_text(body_html)
 
         alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(body_text or "", "plain", "utf-8"))
-        alt.attach(MIMEText(body_html, "html", "utf-8"))
+        text_part = MIMEText(body_text or "", "plain", "utf-8")
+        encoders.encode_quopri(text_part)
+        alt.attach(text_part)
+
+        html_part = MIMEText(body_html or "", "html", "utf-8")
+        encoders.encode_quopri(html_part)
+        alt.attach(html_part)
 
         if has_attachments:
             msg = MIMEMultipart("mixed")
@@ -772,9 +778,12 @@ def api_send():
         body_text = body_text or legacy_body or ""
         if has_attachments:
             msg = MIMEMultipart("mixed")
-            msg.attach(MIMEText(body_text or "", "plain", "utf-8"))
+            text_part = MIMEText(body_text or "", "plain", "utf-8")
+            encoders.encode_quopri(text_part)
+            msg.attach(text_part)
         else:
             msg = MIMEText(body_text or "", "plain", "utf-8")
+            encoders.encode_quopri(msg)
 
     msg["From"] = EMAIL_ACCOUNT
     if to_list:
@@ -808,10 +817,14 @@ def api_send():
             continue
 
         main_type, _, sub_type = content_type.partition("/")
+        if not main_type:
+            main_type = "application"
         if not sub_type:
             sub_type = "octet-stream"
 
-        part = MIMEApplication(payload, _subtype=sub_type)
+        part = MIMEBase(main_type, sub_type)
+        part.set_payload(payload)
+        encoders.encode_base64(part)
         part.add_header("Content-Disposition", "attachment", filename=filename)
         msg.attach(part)
 
@@ -820,7 +833,7 @@ def api_send():
     if not recipients:
         recipients = [EMAIL_ACCOUNT]
 
-    raw_msg_bytes = msg.as_bytes()
+    raw_msg_bytes = msg.as_bytes(policy=policy.SMTP)
 
     try:
         # --- Send via SMTP ---

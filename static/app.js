@@ -202,6 +202,7 @@ function openCompose() {
       </div>
 
       <div id="composeEditor" class="compose-editor" contenteditable="true"></div>
+      <div id="composeAttachmentBar" class="attachment-bar" style="display:none;"></div>
 
       <footer class="compose-foot">
         <button id="composeSendBtn" class="primary-btn">Send</button>
@@ -209,32 +210,37 @@ function openCompose() {
     </article>
   `;
 
-  const editor = document.getElementById("composeEditor");
-  const attachmentsBox = document.getElementById("composeAttachments");
+  const sendBtn = document.getElementById("composeSendBtn");
+  if (sendBtn) {
+    sendBtn.type = "button";
+    sendBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      sendBtn.disabled = true;
 
-  if (editor && attachmentsBox) {
+      try {
+        await sendCurrentCompose();
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+  }
+
+  state.composeAttachments = [];
+  renderComposeAttachments();
+
+  const editor = document.getElementById("composeEditor");
+  if (editor) {
     editor.addEventListener("dragover", (e) => {
       if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
-        attachmentsBox.classList.add("drag-over");
       }
-    });
-
-    editor.addEventListener("dragleave", () => {
-      attachmentsBox.classList.remove("drag-over");
     });
 
     editor.addEventListener("drop", (e) => {
-      if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0)) {
-        return;
-      }
-
+      if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0)) return;
       e.preventDefault();
-      attachmentsBox.classList.remove("drag-over");
-
-      const files = Array.from(e.dataTransfer.files);
-      files.forEach((file) => addComposeAttachment(file));
+      addComposeAttachments(e.dataTransfer.files);
     });
   }
 }
@@ -298,12 +304,12 @@ async function sendCurrentCompose() {
     alert("Message sent ✅");
 
     state.composeAttachments = [];
-    await loadInbox();
-    const detailPane = document.getElementById("detailPane");
-    if (detailPane) {
-      detailPane.innerHTML =
-        '<div class="placeholder"><p>No Message Selected</p></div>';
-    }
+    state.selectedMessage = null;
+
+    await Promise.all([loadInboxCounts(), loadFolders()]);
+    await loadMessages(state.account);
+
+    ensureMessageSelected();
   } catch (err) {
     console.error("Send failed", err);
     alert("Failed to send email: " + (err.message || "Unknown error"));
@@ -802,28 +808,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   })();
 });
-
-// Example frontend function to send an email:
-async function sendEmail(subject, body, to_email) {
-  const response = await fetch('/api/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      subject,
-      to: to_email,
-      body_text: body,
-      body_html: body,
-    })
-  });
-
-  const data = await response.json();
-
-  if (response.ok) {
-    alert("Email sent successfully!");
-  } else {
-    alert("Failed to send email: " + data.error);
-  }
-}
 
 async function fetchEmails() {
   const response = await fetch('/api/messages');
