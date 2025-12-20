@@ -5,6 +5,7 @@ const state = {
   baseTitle: document.title,
   selectedMessage: null,
   lastDeleted: null,
+  composeAttachments: [],
 };
 const TRASH_KEY = "Gel&APY-scht";
 
@@ -87,9 +88,66 @@ function priorityLabel(p) {
   return "Normal";
 }
 
+// --- helpers for attachments ---
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("File read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function fileToAttachmentJson(file) {
+  const data = await readFileAsBase64(file);
+  return {
+    filename: file.name || "attachment",
+    content_type: file.type || "application/octet-stream",
+    data,
+  };
+}
+
+function addComposeAttachments(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  state.composeAttachments.push(...list);
+  renderComposeAttachments();
+}
+
+function renderComposeAttachments() {
+  const bar = document.getElementById("composeAttachmentBar");
+  if (!bar) return;
+
+  bar.innerHTML = "";
+  if (!state.composeAttachments.length) {
+    bar.style.display = "none";
+    return;
+  }
+  bar.style.display = "flex";
+
+  state.composeAttachments.forEach((file, idx) => {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "attachment-pill";
+    pill.textContent = file.name || `Attachment ${idx + 1}`;
+    pill.title = "Remove attachment";
+
+    pill.addEventListener("click", () => {
+      state.composeAttachments.splice(idx, 1);
+      renderComposeAttachments();
+    });
+
+    bar.appendChild(pill);
+  });
+}
+
 // --- Compose ("Write") ---
 function openCompose() {
-  // No selected message while composing
   state.selectedMessage = null;
 
   const pane = document.getElementById("detailPane");
@@ -182,25 +240,34 @@ function openCompose() {
 }
 
 async function sendCurrentCompose() {
-  const toInput = document.getElementById("composeTo");
-  const ccInput = document.getElementById("composeCc");
-  const bccInput = document.getElementById("composeBcc");
-  const subjectInput = document.getElementById("composeSubject");
+  const to = document.getElementById("composeTo").value.trim();
+  const cc = document.getElementById("composeCc").value.trim();
+  const bcc = document.getElementById("composeBcc").value.trim();
+  const subject = document.getElementById("composeSubject").value.trim();
+  const priority = document.getElementById("composePriority").value;
+
   const editor = document.getElementById("composeEditor");
+  const bodyHtml = editor.innerHTML;
 
-  const prioritySelect = document.getElementById("composePriority");
-  const priority = prioritySelect ? prioritySelect.value : "normal";
-
-  const to = toInput ? toInput.value.trim() : "";
-  const cc = ccInput ? ccInput.value.trim() : "";
-  const bcc = bccInput ? bccInput.value.trim() : "";
-  const subject = subjectInput ? subjectInput.value || "" : "";
-  const bodyHtml = editor ? editor.innerHTML : "";
-  const bodyText = editor ? editor.innerText : "";
+  // get plain text version
+  const temp = editor.cloneNode(true);
+  const bodyText = temp.innerText || temp.textContent || "";
 
   if (!to && !cc && !bcc) {
     alert("Please enter at least one recipient (To, Cc or Bcc).");
-    if (toInput) toInput.focus();
+    return;
+  }
+
+  let attachments = [];
+  try {
+    if (state.composeAttachments && state.composeAttachments.length) {
+      attachments = await Promise.all(
+        state.composeAttachments.map((f) => fileToAttachmentJson(f))
+      );
+    }
+  } catch (err) {
+    console.error("Attachment encode failed", err);
+    alert("Failed to prepare attachments: " + (err.message || "Unknown error"));
     return;
   }
 
@@ -209,36 +276,37 @@ async function sendCurrentCompose() {
     cc,
     bcc,
     subject,
+    priority,
     body_html: bodyHtml,
     body_text: bodyText,
-    priority,
+    attachments,
   };
 
-  let res, data;
   try {
-    res = await fetch("/api/send", {
+    const res = await fetch("/api/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    data = await res.json().catch(() => ({}));
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || data.error) {
+      throw new Error(data.error || res.statusText);
+    }
+
+    alert("Message sent ✅");
+
+    state.composeAttachments = [];
+    await loadInbox();
+    const detailPane = document.getElementById("detailPane");
+    if (detailPane) {
+      detailPane.innerHTML =
+        '<div class="placeholder"><p>No Message Selected</p></div>';
+    }
   } catch (err) {
-    alert("Failed to send email: network error");
-    return;
-  }
-
-  if (!res.ok || (data && data.error)) {
-    alert("Failed to send email: " + (data && data.error ? data.error : res.statusText));
-    return;
-  }
-
-  // After sending: refresh inbox + show small confirmation
-  await loadInboxCounts();
-  await loadMessages(state.account);
-
-  const pane = document.getElementById("detailPane");
-  if (pane) {
-    pane.innerHTML = `<div class="placeholder"><p>Message sent</p></div>`;
+    console.error("Send failed", err);
+    alert("Failed to send email: " + (err.message || "Unknown error"));
   }
 }
 

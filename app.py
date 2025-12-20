@@ -671,6 +671,43 @@ def api_attachment(account, id, att_index):
         except Exception:
             pass
 
+def extract_data_uri_attachments_from_html(html):
+    """
+    Find <img src="data:..."> tags, turn them into attachments, and
+    replace them with a small placeholder so GMX doesn't choke on
+    ultra-long lines.
+    Returns: (clean_html, attachments_list)
+    """
+    if not html:
+        return html, []
+
+    pattern = re.compile(
+        r'<img\b[^>]*\bsrc=["\'](data:(?P<mime>[^;]+);base64,(?P<data>[A-Za-z0-9+/=\s]+))["\'][^>]*>',
+        re.IGNORECASE,
+    )
+
+    attachments = []
+    idx = 1
+
+    def repl(match):
+        nonlocal idx
+        mime = match.group("mime") or "application/octet-stream"
+        # remove whitespace in the base64 part
+        data_b64 = re.sub(r"\s+", "", match.group("data") or "")
+        attachments.append(
+            {
+                "filename": f"inline-image-{idx}.bin",
+                "content_type": mime,
+                "data": data_b64,
+            }
+        )
+        placeholder = f'<p>[image {idx}]</p>'
+        idx += 1
+        return placeholder
+
+    cleaned_html = pattern.sub(repl, html)
+    return cleaned_html, attachments
+
 @app.route("/api/send", methods=["POST"])
 def api_send():
     data = request.json or {}
@@ -690,6 +727,7 @@ def api_send():
 
         return [p.strip() for p in parts if p.strip()]
 
+    # --- Recipients / meta ---
     to_list = parse_addr_list(data.get("to"))
     cc_list = parse_addr_list(data.get("cc"))
     bcc_list = parse_addr_list(data.get("bcc"))
@@ -701,14 +739,12 @@ def api_send():
     body_text = data.get("body_text")
     legacy_body = data.get("body", "")
 
-    attachments_json = data.get("attachments") or []
-
-    extra_inline_attachments = []
+    # --- turn inline data: images into attachments ---
+    inline_attachments = []
     if body_html:
-        extra_inline_attachments, body_html = extract_data_uri_attachments_from_html(body_html)
+        body_html, inline_attachments = extract_data_uri_attachments_from_html(body_html)
 
-    if extra_inline_attachments:
-        attachments_json.extend(extra_inline_attachments)
+    attachments_json = (data.get("attachments") or []) + inline_attachments
 
     if not (to_list or cc_list or bcc_list):
         return jsonify(
@@ -720,7 +756,6 @@ def api_send():
 
     # ---- Build message structure ----
     if has_html:
-        # Create the alternative part (plain + HTML)
         if not body_text:
             body_text = html_to_text(body_html)
 
@@ -759,7 +794,7 @@ def api_send():
         msg["X-Priority"] = "3 (Normal)"
         msg["Importance"] = "Normal"
 
-    # ---- Attach files ----
+    # ---- Attach files (JSON + extracted data: URIs) ----
     for att in attachments_json:
         try:
             filename = att.get("filename") or "attachment"
